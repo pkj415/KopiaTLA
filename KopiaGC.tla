@@ -37,6 +37,7 @@ VARIABLES
             }
         *)
         snapshots,
+        gcs,
         current_timestamp
 
 KopiaInit == /\ snapshots = EmptyBag
@@ -101,54 +102,51 @@ FlushIndex(snapshot) ==
 
 TriggerSnapshot == /\ snapshots' = snapshots (+) SetToBag({[
                                         status |-> "in_progress", contents_written |-> {},
-                                        index_blobs |-> index_blobs, \* Can this be made reduced to a set instead of a bag?
+                                        index_blobs |-> index_blobs, \* Can this be reduced to a set instead of a bag?
                                         index_blob_to_be_flushed |-> {},
                                         start_timestamp |-> current_timestamp]})
 
-KopiaNext == 
-             \/ 
-                \* Trigger a snapshot
-                /\ BagCardinality(snapshots) < MaxSnapshotsIssued
-                /\ TriggerSnapshot
-                /\ UNCHANGED <<index_blobs, current_timestamp>>
-\*                /\ Print("Trigger a snapshot", TRUE)
-             \/ 
-                /\ \E snapshot \in BagToSet(snapshots):
-                    \* Write some contents to a blob
-                    \/  /\ snapshot.status = "in_progress"
-                        /\ WriteContents(snapshot)
-                        /\ UNCHANGED <<index_blobs, current_timestamp>>
-\*                        /\ Print("Write come contents", TRUE)
-                    \* Flush index 
-                    \/  /\ snapshot.status = "in_progress"
-                        /\ snapshot.index_blob_to_be_flushed # {}
-                        /\ FlushIndex(snapshot)
-                        /\ UNCHANGED <<current_timestamp>>
-\*                        /\ Print("Flush Index", TRUE)
-                    \* Complete snapshot
-                    \/  
-                        /\ snapshot.status = "in_progress"
-                        /\ snapshot.start_timestamp + MaxSnapshotTime <= current_timestamp
-                        /\ snapshot.index_blob_to_be_flushed = {} \* There is nothing to be flushed
-                        /\  LET updated_snapshot == [snapshot EXCEPT !.status = "completed"]
-                            IN  /\ UNCHANGED <<index_blobs, current_timestamp>>
-                                /\ snapshots' = (snapshots (+) SetToBag({updated_snapshot})) (-) SetToBag({snapshot})
-\*                        /\ Print("Complete snapshot", TRUE)
-                    \* Delete a snapshot
-                    \/ 
-                        /\ snapshot.status = "completed"
-                        /\  LET updated_snapshot == [snapshot EXCEPT !.status = "deleted"]
-                            IN  /\ snapshots' = (snapshots (+) SetToBag({updated_snapshot})) (-) SetToBag({snapshot})
-                                /\ UNCHANGED <<index_blobs, current_timestamp>>
-\*                        /\ Print("Delete snapshot", TRUE)
-                    \* Tick time forward
-                    \/
-                        /\ current_timestamp < MaxLogicalTime
-                        /\ current_timestamp' = current_timestamp + 1
-                        /\ UNCHANGED <<index_blobs, snapshots>>
-\*                        /\ Print("Tick time forward", TRUE)
+SnapshotProcessing ==
+                     \/ \* Trigger a snapshot
+                        /\ BagCardinality(snapshots) < MaxSnapshotsIssued
+                        /\ TriggerSnapshot
+                        /\ UNCHANGED <<index_blobs, current_timestamp, gcs>>
 
+                     \/
+                        /\ \E snapshot \in BagToSet(snapshots):
+
+                            \/  \* Write some contents to a blob
+                                /\ snapshot.status = "in_progress"
+                                /\ WriteContents(snapshot)
+                                /\ UNCHANGED <<index_blobs, current_timestamp, gcs>>
+
+                            \/  \* Flush index
+                                /\ snapshot.status = "in_progress"
+                                /\ snapshot.index_blob_to_be_flushed # {}
+                                /\ FlushIndex(snapshot)
+                                /\ UNCHANGED <<current_timestamp, gcs>>
+
+                            \/  \* Complete snapshot
+                                /\ snapshot.status = "in_progress"
+                                /\ snapshot.start_timestamp + MaxSnapshotTime <= current_timestamp
+                                /\ snapshot.index_blob_to_be_flushed = {} \* There is nothing to be flushed
+                                /\  LET updated_snapshot == [snapshot EXCEPT !.status = "completed"]
+                                    IN  /\ UNCHANGED <<index_blobs, current_timestamp, gcs>>
+                                        /\ snapshots' = (snapshots (+) SetToBag({updated_snapshot})) (-) SetToBag({snapshot})
+
+                            \/  \* Delete a snapshot
+                                /\ snapshot.status = "completed"
+                                /\  LET updated_snapshot == [snapshot EXCEPT !.status = "deleted"]
+                                    IN  /\ snapshots' = (snapshots (+) SetToBag({updated_snapshot})) (-) SetToBag({snapshot})
+                                        /\ UNCHANGED <<index_blobs, current_timestamp, gcs>>
+
+KopiaNext == \/ SnapshotProcessing
+             \/ \* Tick time forward
+                /\ current_timestamp < MaxLogicalTime
+                /\ current_timestamp' = current_timestamp + 1
+                /\ UNCHANGED <<index_blobs, snapshots, gcs>>
+                \* /\ Print("Tick time forward", TRUE)
 =============================================================================
 \* Modification History
-\* Last modified Sat Apr 11 10:09:40 CDT 2020 by pkj
+\* Last modified Sun Apr 12 10:25:13 CDT 2020 by pkj
 \* Created Fri Apr 10 15:50:28 CDT 2020 by pkj
