@@ -1,13 +1,14 @@
 ------------------------------ MODULE KopiaGC ------------------------------
-(* Blob store
-    Avoid using sequences where possible, using sets can reduce state space.
+(*
+    General rules of thumb - Avoid using sequences where possible, using sets/bags can reduce state space.
 
-Had started with a bag of contents for a snapshots. Reverted to using a set because
-a snapshot will not do anything in case the same content is to be written again. Because, it doesn't
-refresh the index from the blob store. This can be relaxed later if we have such a case.
+    Things to possibly consider later -
 
-Index blob entries don't have timestamp order. This is because the Sequence of index_blobs mimicks
-time order, and TLC generates all possibles states in the state spaces.
+    1. Had started with a bag of contents for snapshots. Reverted to using a set because
+       a snapshot will not do anything in case the same content is to be written again. Because, it doesn't
+       refresh the index from the blob store. This can be relaxed later if we have such a case.
+    2. Similarly, not considering refresh of indices and snapshot manifest midway in a GC process.
+
 *)
 
 EXTENDS Integers, Sequences, FiniteSets, Bags, TLC
@@ -15,12 +16,13 @@ EXTENDS Integers, Sequences, FiniteSets, Bags, TLC
 CONSTANT
     NumContents, \* Restrict behaviours to snapshots that can contain contents with content IDs 0..NumContents-1
     MaxSnapshotsIssued, \* Maximum number of snapshots that can be issued. Constraint needed to restrict state space, else TLC will run forever
-    MaxSnapshotTime, \* Maximum number of logical time steps a snapshot process can take. Post that it will not be processed.
-    MaxLogicalTime \* Can't keep TLC running forever
+    MaxSnapshotTime, \* Maximum number of logical time steps a snapshot process can take. Post that it will not be able to mark itself "completed".
+    MaxLogicalTime, \* Can't keep TLC running forever
+    MaxGCsIssued
     (* TODO - Explain how logical time is modeled, and how this field changes the scope of possible behaviours *)
 
 VARIABLES
-        (* Format - Bag of index blobs each having a set (or bag? is it a bag in Kopia?) of records which specify contents.
+        (* Format - Bag of index blobs each having a set (or should we use a bag? is it a bag in Kopia?) of records which specify contents.
             TODO - Check if it can all be part of one sequence. This will reduce the number of unique states.
             {
                 {[content_id |-> 0, deleted |-> TRUE/FALSE, timestamp |-> 0]}
@@ -29,20 +31,35 @@ VARIABLES
         index_blobs,
         (* Format - Bag of records.
             {
-             [status |-> "in_progress", "completed", "deleted",
-              contents_written |-> Contents that have written to the blob storage for the snapshot,
-              index_blobs |-> snapshot of index blobs read at the start of snapshotting process, later this is updated on every flush of indices.
+             [status |-> "in_progress", "completed", "deleted", \* "completed" is analogous to the manifest for the snapshot being written to the store
+              contents_written |-> Contents that have been written to the blob storage for the snapshot,
+              index_blobs |-> Point in time view of index blobs read at the start of snapshotting process, later this is updated on every
+                flush of indices. Note that the update will only append flushed indices to this field. The indices are not refreshed from
+                the global indices.
               index_blob_to_be_flushed |-> index blob that can be flushed to global index_blobs,
               start_timestamp |-> start_timestamp]
             }
         *)
         snapshots,
+        (*
+            {
+                [
+                    snapshots |-> Point in time view of the snapshots in the repository. Populated when this GC is triggered.
+                    index_blobs |-> Point in time view of the global index_blobs.
+                    contents_deleted |-> {[content_id |-> 0, deleted |-> TRUE, timestamp |-> 0]},
+                    deletions_to_be_flushed |-> index blob of deletion entries that can be flushed to global index_blobs
+                ]
+            }
+        *)
         gcs,
-        current_timestamp
+        current_timestamp,
+        actionPreformedInTimestep
 
 KopiaInit == /\ snapshots = EmptyBag
              /\ current_timestamp = 0
              /\ index_blobs = EmptyBag
+             /\ gcs = EmptyBag
+             /\ actionPreformedInTimestep = FALSE
 
 NonEmptyPowerset(s) == (SUBSET s \ {{}})
 
@@ -63,7 +80,9 @@ HasContentInfo(idx_blobs, content_id) == LET matching_content_infos == UNION({
                                             ELSE FALSE
 
 \* An index blob will have just one entry for each content ID. It can't have more than one. If this assumption breaks, change this logic.
-\* Call only if HasContentInfo is TRUE
+\* Call this only if HasContentInfo is TRUE.
+\* TODO - Also, in case a deleted entry is present along with a normal entry at the same timestamp, consider
+\* the non-deleted one.
 GetContentInfo(idx_blobs, content_id) ==
                                         LET matching_content_infos == UNION({
                                             UNION{
@@ -71,6 +90,9 @@ GetContentInfo(idx_blobs, content_id) ==
                                                 ELSE {} : content_info \in idx_blob} : idx_blob \in BagToSet(idx_blobs)})
                                         IN CHOOSE content_info \in matching_content_infos:
                                                 \A c \in matching_content_infos: c.timestamp <= content_info.timestamp
+
+\* Define set of all content IDs in the idx_blobs irrespective of whether they are deleted or not.
+ContentIDs(idx_blobs) == UNION{{content_info.content_id: content_info \in idx_blob} : idx_blob \in BagToSet(idx_blobs)}
 
 (* A thought (mostly incorrect) -
 \* The case of a snapshot process being past its max time limit doesn't require explicit specification, it is as good as a smaller snapshot being completed
@@ -140,13 +162,67 @@ SnapshotProcessing ==
                                     IN  /\ snapshots' = (snapshots (+) SetToBag({updated_snapshot})) (-) SetToBag({snapshot})
                                         /\ UNCHANGED <<index_blobs, current_timestamp, gcs>>
 
-KopiaNext == \/ SnapshotProcessing
-             \/ \* Tick time forward
+\* TriggerGC stores a point in time view of snapshots and the global index_blobs in the GC process record.
+\* Consider only completed snapshots in TriggerGC, this helps in reducing state space. Reasoning - If all snapshots were kept in the GC process record,
+\* two states with GC processes having the same set of completed snapshots but different set of non-completed snapshots would be differentiated,
+\* even though the behaviour following those states won't be affected by the non-completed snapshots stored in the GC record (GC doesn't use the
+\* information in non-completed records).
+\* TODO - Pick only latest entries of each content in the index_blobs. This will help reduce the state space.
+TriggerGC == 
+              gcs' = gcs (+) SetToBag({[snapshots |-> {snap \in BagToSet(snapshots): snap.status = "completed"},
+                                        index_blobs |-> index_blobs, \* Can this be reduced to a set instead of a bag?
+                                        contents_deleted |-> {},
+                                        deletions_to_be_flushed |-> {}
+                                       ]})
+
+UnusedContentIDs(idx_blobs, snaps) == {content_id \in ContentIDs(idx_blobs):
+                                                /\ ~ GetContentInfo(idx_blobs, content_id).deleted} \ UNION{snap.contents_written: snap \in snaps}
+
+DeleteContents(gc) == /\ \E content_ids_to_delete \in
+                              NonEmptyPowerset(UnusedContentIDs(gc.index_blobs, gc.snapshots) \ {content_info.content_id : content_info \in gc.contents_deleted}):
+                                LET contents_to_delete == [content_id: content_ids_to_delete, timestamp: {current_timestamp}, deleted: {TRUE}]
+                                    updated_gc == [gc EXCEPT !.contents_deleted = gc.contents_deleted \cup contents_to_delete,
+                                                             !.deletions_to_be_flushed = contents_to_delete]
+                                IN
+                                    /\ gcs' = (gcs (-) SetToBag({gc})) (+) SetToBag({updated_gc})
+
+FlushDeletedContents(gc) ==  LET
+                                updated_gc == [gc EXCEPT !.deletions_to_be_flushed = {}]
+                             IN
+                                /\ gcs' = (gcs (-) SetToBag({gc})) (+) SetToBag({updated_gc})
+                                /\ index_blobs' = index_blobs (+) SetToBag({gc.deletions_to_be_flushed})
+
+GC_Processing == \/
+                    \* Trigger GC. Load the index blobs and completed snapshots (not all, to save on state space) at the current_timestamp.
+                    /\ BagCardinality(gcs) < MaxGCsIssued
+                    /\ TriggerGC
+                    /\ UNCHANGED <<snapshots, index_blobs, current_timestamp>>
+                 \/
+                    \* Delete some contents which are in the index blobs, but not referenced by the snapshots.
+                    /\ \E gc \in BagToSet(gcs):
+                        /\ DeleteContents(gc)
+                        /\ UNCHANGED <<snapshots, index_blobs, current_timestamp>>
+                 \/ \* Flush index blob of deleted entries
+                    /\ \E gc \in BagToSet(gcs):
+                        /\ gc.deletions_to_be_flushed # {}
+                        /\ FlushDeletedContents(gc)
+                        /\ UNCHANGED <<snapshots, current_timestamp>>
+
+KopiaNext == \/ 
+                /\ SnapshotProcessing
+                /\ actionPreformedInTimestep' = TRUE
+             \/ 
+                /\ GC_Processing
+                /\ actionPreformedInTimestep' = TRUE
+             \/ \* Tick time forward. Increment logical time only if some state change occured in the time step. If not, don't increment.
+                \* This trick helps reduce state space, while not missing out on important behaviours (we don't need to consider no-op behaviours). 
                 /\ current_timestamp < MaxLogicalTime
+                /\ actionPreformedInTimestep = TRUE
                 /\ current_timestamp' = current_timestamp + 1
+                /\ actionPreformedInTimestep' = FALSE
                 /\ UNCHANGED <<index_blobs, snapshots, gcs>>
                 \* /\ Print("Tick time forward", TRUE)
 =============================================================================
 \* Modification History
-\* Last modified Sun Apr 12 10:25:13 CDT 2020 by pkj
+\* Last modified Sun Apr 12 23:48:47 CDT 2020 by pkj
 \* Created Fri Apr 10 15:50:28 CDT 2020 by pkj
