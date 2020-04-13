@@ -22,10 +22,9 @@ CONSTANT
     (* TODO - Explain how logical time is modeled, and how this field changes the scope of possible behaviours *)
 
 VARIABLES
-        (* Format - Bag of index blobs each having a set (or should we use a bag? is it a bag in Kopia?) of records which specify contents.
-            TODO - Check if it can all be part of one sequence. This will reduce the number of unique states.
+        (* Format - Set of content info entries.
             {
-                {[content_id |-> 0, deleted |-> TRUE/FALSE, timestamp |-> 0]}
+                [content_id |-> 0, deleted |-> TRUE/FALSE, timestamp |-> 0]
             }
         *)
         index_blobs,
@@ -57,7 +56,7 @@ VARIABLES
 
 KopiaInit == /\ snapshots = EmptyBag
              /\ current_timestamp = 0
-             /\ index_blobs = EmptyBag
+             /\ index_blobs = {}
              /\ gcs = EmptyBag
              /\ actionPreformedInTimestep = FALSE
 
@@ -72,10 +71,8 @@ IndexBlobsTypeOK == /\ IsABag(index_blobs)
 KopiaTypeOK == /\ IndexBlobsTypeOK
                /\ current_timestamp \in 0..MaxLogicalTime
 
-HasContentInfo(idx_blobs, content_id) == LET matching_content_infos == UNION({
-                                            UNION{
-                                                IF content_info.content_id = content_id THEN {content_info}
-                                                ELSE {} : content_info \in idx_blob} : idx_blob \in BagToSet(idx_blobs)})
+HasContentInfo(idx_blobs, content_id) == LET matching_content_infos == {
+                                                content_info \in idx_blobs: content_info.content_id = content_id}
                                          IN IF matching_content_infos # {} THEN TRUE
                                             ELSE FALSE
 
@@ -84,15 +81,23 @@ HasContentInfo(idx_blobs, content_id) == LET matching_content_infos == UNION({
 \* TODO - Also, in case a deleted entry is present along with a normal entry at the same timestamp, consider
 \* the non-deleted one.
 GetContentInfo(idx_blobs, content_id) ==
-                                        LET matching_content_infos == UNION({
-                                            UNION{
-                                                IF content_info.content_id = content_id THEN {content_info}
-                                                ELSE {} : content_info \in idx_blob} : idx_blob \in BagToSet(idx_blobs)})
+                                        LET matching_content_infos == {
+                                                content_info \in idx_blobs: content_info.content_id = content_id}
                                         IN CHOOSE content_info \in matching_content_infos:
                                                 \A c \in matching_content_infos: c.timestamp <= content_info.timestamp
 
 \* Define set of all content IDs in the idx_blobs irrespective of whether they are deleted or not.
-ContentIDs(idx_blobs) == UNION{{content_info.content_id: content_info \in idx_blob} : idx_blob \in BagToSet(idx_blobs)}
+ContentIDs(idx_blobs) == {content_info.content_id: content_info \in idx_blobs}
+
+\* TODO - Handle the case where a deleted entry has the same timestamp as a normal entry for a given content ID. Or maybe don't handle it and leave it
+\* as is?
+MergeIndices(idx_blobs_1, idx_blobs_2) == {content_info \in idx_blobs_1 \cup idx_blobs_2:
+                                             /\
+                                                \/ ~ HasContentInfo(idx_blobs_1, content_info.content_id)
+                                                \/ GetContentInfo(idx_blobs_1, content_info.content_id).timestamp <= content_info.timestamp
+                                             /\
+                                                \/ ~ HasContentInfo(idx_blobs_2, content_info.content_id)
+                                                \/ GetContentInfo(idx_blobs_2, content_info.content_id).timestamp <= content_info.timestamp}
 
 (* A thought (mostly incorrect) -
 \* The case of a snapshot process being past its max time limit doesn't require explicit specification, it is as good as a smaller snapshot being completed
@@ -116,15 +121,15 @@ WriteContents(snap) == /\ \E contents_to_write \in NonEmptyPowerset(0..NumConten
  
 FlushIndex(snapshot) == 
                        LET
-                           updated_snapshot == [snapshot EXCEPT !.index_blobs = snapshot.index_blobs (+) SetToBag({snapshot.index_blob_to_be_flushed}),
+                           updated_snapshot == [snapshot EXCEPT !.index_blobs = MergeIndices(snapshot.index_blobs, snapshot.index_blob_to_be_flushed),
                                                                 !.index_blob_to_be_flushed = {}]
                        IN
                            /\ snapshots' = (snapshots (-) SetToBag({snapshot})) (+) SetToBag({updated_snapshot})
-                           /\ index_blobs' = index_blobs (+) SetToBag({snapshot.index_blob_to_be_flushed})
+                           /\ index_blobs' = MergeIndices(snapshot.index_blobs, snapshot.index_blob_to_be_flushed)
 
 TriggerSnapshot == /\ snapshots' = snapshots (+) SetToBag({[
                                         status |-> "in_progress", contents_written |-> {},
-                                        index_blobs |-> index_blobs, \* Can this be reduced to a set instead of a bag?
+                                        index_blobs |-> index_blobs,
                                         index_blob_to_be_flushed |-> {},
                                         start_timestamp |-> current_timestamp]})
 
@@ -167,10 +172,9 @@ SnapshotProcessing ==
 \* two states with GC processes having the same set of completed snapshots but different set of non-completed snapshots would be differentiated,
 \* even though the behaviour following those states won't be affected by the non-completed snapshots stored in the GC record (GC doesn't use the
 \* information in non-completed records).
-\* TODO - Pick only latest entries of each content in the index_blobs. This will help reduce the state space.
-TriggerGC == 
+TriggerGC ==
               gcs' = gcs (+) SetToBag({[snapshots |-> {snap \in BagToSet(snapshots): snap.status = "completed"},
-                                        index_blobs |-> index_blobs, \* Can this be reduced to a set instead of a bag?
+                                        index_blobs |-> index_blobs,
                                         contents_deleted |-> {},
                                         deletions_to_be_flushed |-> {}
                                        ]})
@@ -187,31 +191,33 @@ DeleteContents(gc) == /\ \E content_ids_to_delete \in
                                     /\ gcs' = (gcs (-) SetToBag({gc})) (+) SetToBag({updated_gc})
 
 FlushDeletedContents(gc) ==  LET
+                                \* No need to update the gc.index_blobs like we did for snapshots. This is because once a content is deleted by its
+                                \* presence in gc.contents_deleted, it will never be checked again in the gc.index_blobs.
                                 updated_gc == [gc EXCEPT !.deletions_to_be_flushed = {}]
                              IN
                                 /\ gcs' = (gcs (-) SetToBag({gc})) (+) SetToBag({updated_gc})
-                                /\ index_blobs' = index_blobs (+) SetToBag({gc.deletions_to_be_flushed})
+                                /\ index_blobs' = MergeIndices(index_blobs, gc.deletions_to_be_flushed)
 
 GC_Processing == \/
                     \* Trigger GC. Load the index blobs and completed snapshots (not all, to save on state space) at the current_timestamp.
                     /\ BagCardinality(gcs) < MaxGCsIssued
                     /\ TriggerGC
                     /\ UNCHANGED <<snapshots, index_blobs, current_timestamp>>
-                 \/
-                    \* Delete some contents which are in the index blobs, but not referenced by the snapshots.
-                    /\ \E gc \in BagToSet(gcs):
-                        /\ DeleteContents(gc)
-                        /\ UNCHANGED <<snapshots, index_blobs, current_timestamp>>
-                 \/ \* Flush index blob of deleted entries
-                    /\ \E gc \in BagToSet(gcs):
-                        /\ gc.deletions_to_be_flushed # {}
-                        /\ FlushDeletedContents(gc)
-                        /\ UNCHANGED <<snapshots, current_timestamp>>
+\*                 \/
+\*                    \* Delete some contents which are in the index blobs, but not referenced by the snapshots.
+\*                    /\ \E gc \in BagToSet(gcs):
+\*                        /\ DeleteContents(gc)
+\*                        /\ UNCHANGED <<snapshots, index_blobs, current_timestamp>>
+\*                 \/ \* Flush index blob of deleted entries
+\*                    /\ \E gc \in BagToSet(gcs):
+\*                        /\ gc.deletions_to_be_flushed # {}
+\*                        /\ FlushDeletedContents(gc)
+\*                        /\ UNCHANGED <<snapshots, current_timestamp>>
 
 KopiaNext == \/ 
                 /\ SnapshotProcessing
                 /\ actionPreformedInTimestep' = TRUE
-             \/ 
+             \/
                 /\ GC_Processing
                 /\ actionPreformedInTimestep' = TRUE
              \/ \* Tick time forward. Increment logical time only if some state change occured in the time step. If not, don't increment.
@@ -224,5 +230,5 @@ KopiaNext == \/
                 \* /\ Print("Tick time forward", TRUE)
 =============================================================================
 \* Modification History
-\* Last modified Sun Apr 12 23:48:47 CDT 2020 by pkj
+\* Last modified Mon Apr 13 00:26:44 CDT 2020 by pkj
 \* Created Fri Apr 10 15:50:28 CDT 2020 by pkj
