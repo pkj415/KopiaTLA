@@ -27,15 +27,15 @@ VARIABLES
                 [content_id |-> 0, deleted |-> TRUE/FALSE, timestamp |-> 0]
             }
         *)
-        index_blobs,
+        index,
         (* Format - Bag of records.
             {
              [status |-> "in_progress", "completed", "deleted", \* "completed" is analogous to the manifest for the snapshot being written to the store
               contents_written |-> Contents that have been written to the blob storage for the snapshot,
-              index_blobs |-> Point in time view of index blobs read at the start of snapshotting process, later this is updated on every
+              index |-> Point in time view of index read at the start of snapshotting process, later this is updated on every
                 flush of indices. Note that the update will only append flushed indices to this field. The indices are not refreshed from
                 the global indices.
-              index_blob_to_be_flushed |-> index blob that can be flushed to global index_blobs,
+              index_blob_to_be_flushed |-> index blob that can be flushed to global index,
               start_timestamp |-> start_timestamp]
             }
         *)
@@ -44,9 +44,9 @@ VARIABLES
             {
                 [
                     snapshots |-> Point in time view of the snapshots in the repository. Populated when this GC is triggered.
-                    index_blobs |-> Point in time view of the global index_blobs.
+                    index |-> Point in time view of the global index.
                     contents_deleted |-> {[content_id |-> 0, deleted |-> TRUE, timestamp |-> 0]},
-                    deletions_to_be_flushed |-> index blob of deletion entries that can be flushed to global index_blobs
+                    deletions_to_be_flushed |-> index blob of deletion entries that can be flushed to global index
                 ]
             }
         *)
@@ -56,14 +56,14 @@ VARIABLES
 
 KopiaInit == /\ snapshots = EmptyBag
              /\ current_timestamp = 0
-             /\ index_blobs = {}
+             /\ index = {}
              /\ gcs = EmptyBag
              \* /\ actionPreformedInTimestep = FALSE
 
 NonEmptyPowerset(s) == (SUBSET s \ {{}})
 
-IndexBlobsTypeOK == /\ IsABag(index_blobs)
-                    /\ BagToSet(index_blobs) \in SUBSET(
+IndexBlobsTypeOK == /\ IsABag(index)
+                    /\ BagToSet(index) \in SUBSET(
                             [content_id: 0..NumContents-1,
                              deleted: {TRUE, FALSE},
                              timestamp: 0..MaxLogicalTime])
@@ -90,7 +90,7 @@ GetContentInfo(idx_blobs, content_id) ==
 ContentIDs(idx_blobs) == {content_info.content_id: content_info \in idx_blobs}
 
 \* TODO - Handle the case where a deleted entry has the same timestamp as a normal entry for a given content ID. Or maybe don't handle it and leave it
-\* as is?
+\* as is? If left as is, at a single timestamp there can be a deleted and a normal entry for a single content ID. We can should the normal entry.
 MergeIndices(idx_blobs_1, idx_blobs_2) == {content_info \in idx_blobs_1 \cup idx_blobs_2:
                                              /\
                                                 \/ ~ HasContentInfo(idx_blobs_1, content_info.content_id)
@@ -110,8 +110,8 @@ WriteContents(snap) == /\ \E contents_to_write \in NonEmptyPowerset(0..NumConten
                            \* Pick only those contents which have not been written till now. Even if a snapshot has the same content multiple times
                            \* it would only write it to the blob and add to index once.
                            LET contents_non_existing == {c_id \in contents_to_write:
-                                                             (\/ ~ HasContentInfo(snap.index_blobs, c_id)
-                                                              \/ GetContentInfo(snap.index_blobs, c_id).deleted)}
+                                                             (\/ ~ HasContentInfo(snap.index, c_id)
+                                                              \/ GetContentInfo(snap.index, c_id).deleted)}
                                content_info_entries == [content_id: contents_non_existing,
                                                         timestamp: {current_timestamp},
                                                         deleted: {FALSE}]
@@ -121,15 +121,15 @@ WriteContents(snap) == /\ \E contents_to_write \in NonEmptyPowerset(0..NumConten
  
 FlushIndex(snapshot) == 
                        LET
-                           updated_snapshot == [snapshot EXCEPT !.index_blobs = MergeIndices(snapshot.index_blobs, snapshot.index_blob_to_be_flushed),
+                           updated_snapshot == [snapshot EXCEPT !.index = MergeIndices(snapshot.index, snapshot.index_blob_to_be_flushed),
                                                                 !.index_blob_to_be_flushed = {}]
                        IN
                            /\ snapshots' = (snapshots (-) SetToBag({snapshot})) (+) SetToBag({updated_snapshot})
-                           /\ index_blobs' = MergeIndices(snapshot.index_blobs, snapshot.index_blob_to_be_flushed)
+                           /\ index' = MergeIndices(index, snapshot.index_blob_to_be_flushed)
 
 TriggerSnapshot == /\ snapshots' = snapshots (+) SetToBag({[
                                         status |-> "in_progress", contents_written |-> {},
-                                        index_blobs |-> index_blobs,
+                                        index |-> index,
                                         index_blob_to_be_flushed |-> {},
                                         start_timestamp |-> current_timestamp]})
 
@@ -137,7 +137,7 @@ SnapshotProcessing ==
                      \/ \* Trigger a snapshot
                         /\ BagCardinality(snapshots) < MaxSnapshotsIssued
                         /\ TriggerSnapshot
-                        /\ UNCHANGED <<index_blobs, current_timestamp, gcs>>
+                        /\ UNCHANGED <<index, current_timestamp, gcs>>
 
                      \/
                         /\ \E snapshot \in BagToSet(snapshots):
@@ -145,7 +145,7 @@ SnapshotProcessing ==
                             \/  \* Write some contents to a blob
                                 /\ snapshot.status = "in_progress"
                                 /\ WriteContents(snapshot)
-                                /\ UNCHANGED <<index_blobs, current_timestamp, gcs>>
+                                /\ UNCHANGED <<index, current_timestamp, gcs>>
 
                             \/  \* Flush index
                                 /\ snapshot.status = "in_progress"
@@ -158,19 +158,19 @@ SnapshotProcessing ==
                                 /\ current_timestamp < snapshot.start_timestamp + MaxSnapshotTime
                                 /\ snapshot.index_blob_to_be_flushed = {} \* There is nothing to be flushed
                                 /\  LET updated_snapshot == [snapshot EXCEPT !.status = "completed"]
-                                    IN  /\ UNCHANGED <<index_blobs, current_timestamp, gcs>>
+                                    IN  /\ UNCHANGED <<index, current_timestamp, gcs>>
                                         /\ snapshots' = (snapshots (+) SetToBag({updated_snapshot})) (-) SetToBag({snapshot})
 
                             \/  \* Delete a snapshot
                                 /\ snapshot.status = "completed"
                                 /\  LET updated_snapshot == [snapshot EXCEPT !.status = "deleted"]
                                     IN  /\ snapshots' = (snapshots (+) SetToBag({updated_snapshot})) (-) SetToBag({snapshot})
-                                        /\ UNCHANGED <<index_blobs, current_timestamp, gcs>>
+                                        /\ UNCHANGED <<index, current_timestamp, gcs>>
 
 UnusedContentIDs(idx_blobs, snaps) == {content_id \in ContentIDs(idx_blobs):
                                                 /\ ~ GetContentInfo(idx_blobs, content_id).deleted} \ UNION{snap.contents_written: snap \in snaps}
 
-\* TriggerGC stores a point in time view of snapshots and the global index_blobs in the GC process record.
+\* TriggerGC stores a point in time view of snapshots and the global index in the GC process record.
 \* Consider only completed snapshots in TriggerGC, this helps in reducing state space. Reasoning - If all snapshots were kept in the GC process record,
 \* two states with GC processes having the same set of completed snapshots but different set of non-completed snapshots would be differentiated,
 \* even though the behaviour following those states won't be affected by the non-completed snapshots stored in the GC record (GC doesn't use the
@@ -180,13 +180,13 @@ UnusedContentIDs(idx_blobs, snaps) == {content_id \in ContentIDs(idx_blobs):
 \* reduce state space).
 TriggerGC ==
               /\ gcs' = gcs (+) SetToBag({[snapshots |-> {snap \in BagToSet(snapshots): snap.status = "completed"},
-                                        index_blobs |-> {content_info \in index_blobs: current_timestamp >= (content_info.timestamp + MaxSnapshotTime)},
+                                        index |-> {content_info \in index: current_timestamp >= (content_info.timestamp + MaxSnapshotTime)},
                                         contents_deleted |-> {},
                                         deletions_to_be_flushed |-> {}
                                        ]})
 
 DeleteContents(gc) == /\ \E content_ids_to_delete \in
-                              NonEmptyPowerset(UnusedContentIDs(gc.index_blobs, gc.snapshots) \ {content_info.content_id : content_info \in gc.contents_deleted}):
+                              NonEmptyPowerset(UnusedContentIDs(gc.index, gc.snapshots) \ {content_info.content_id : content_info \in gc.contents_deleted}):
                                 LET contents_to_delete == [content_id: content_ids_to_delete, timestamp: {current_timestamp}, deleted: {TRUE}]
                                     updated_gc == [gc EXCEPT !.contents_deleted = gc.contents_deleted \cup contents_to_delete,
                                                              !.deletions_to_be_flushed = contents_to_delete]
@@ -194,23 +194,23 @@ DeleteContents(gc) == /\ \E content_ids_to_delete \in
                                     /\ gcs' = (gcs (-) SetToBag({gc})) (+) SetToBag({updated_gc})
 
 FlushDeletedContents(gc) ==  LET
-                                \* No need to update the gc.index_blobs like we did for snapshots. This is because once a content is deleted by its
-                                \* presence in gc.contents_deleted, it will never be checked again in the gc.index_blobs.
+                                \* No need to update the gc.index like we did for snapshots. This is because once a content is deleted by its
+                                \* presence in gc.contents_deleted, it will never be checked again in the gc.index.
                                 updated_gc == [gc EXCEPT !.deletions_to_be_flushed = {}]
                              IN
                                 /\ gcs' = (gcs (-) SetToBag({gc})) (+) SetToBag({updated_gc})
-                                /\ index_blobs' = MergeIndices(index_blobs, gc.deletions_to_be_flushed)
+                                /\ index' = MergeIndices(index, gc.deletions_to_be_flushed)
 
 GC_Processing == \/
                     \* Trigger GC. Load the index blobs and completed snapshots (not all, to save on state space) at the current_timestamp.
                     /\ BagCardinality(gcs) < MaxGCsIssued
                     /\ TriggerGC
-                    /\ UNCHANGED <<snapshots, index_blobs, current_timestamp>>
+                    /\ UNCHANGED <<snapshots, index, current_timestamp>>
                  \/
                     \* Delete some contents which are in the index blobs, but not referenced by the snapshots.
                     /\ \E gc \in BagToSet(gcs):
                         /\ DeleteContents(gc)
-                        /\ UNCHANGED <<snapshots, index_blobs, current_timestamp>>
+                        /\ UNCHANGED <<snapshots, index, current_timestamp>>
                  \/ \* Flush index blob of deleted entries
                     /\ \E gc \in BagToSet(gcs):
                         /\ gc.deletions_to_be_flushed # {}
@@ -225,14 +225,14 @@ KopiaNext == \/
                 \* Tick time forward.
                 /\ current_timestamp < MaxLogicalTime
                 /\ current_timestamp' = current_timestamp + 1
-                /\ UNCHANGED <<index_blobs, snapshots, gcs>>
+                /\ UNCHANGED <<index, snapshots, gcs>>
 
 GCInvariant == /\ \A snap \in {snap \in BagToSet(snapshots): snap.status = "completed"}:
                   /\ \A content_id \in snap.contents_written:
-                     /\ HasContentInfo(index_blobs, content_id)
-                     /\ ~ GetContentInfo(index_blobs, content_id).deleted
+                     /\ HasContentInfo(index, content_id)
+                     /\ ~ GetContentInfo(index, content_id).deleted
 
 =============================================================================
 \* Modification History
-\* Last modified Mon Apr 13 21:56:43 CDT 2020 by pkj
+\* Last modified Tue Apr 14 10:11:29 CDT 2020 by pkj
 \* Created Fri Apr 10 15:50:28 CDT 2020 by pkj
