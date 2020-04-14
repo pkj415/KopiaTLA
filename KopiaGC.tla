@@ -51,14 +51,14 @@ VARIABLES
             }
         *)
         gcs,
-        current_timestamp,
-        actionPreformedInTimestep
+        current_timestamp
+        \* actionPreformedInTimestep
 
 KopiaInit == /\ snapshots = EmptyBag
              /\ current_timestamp = 0
              /\ index_blobs = {}
              /\ gcs = EmptyBag
-             /\ actionPreformedInTimestep = FALSE
+             \* /\ actionPreformedInTimestep = FALSE
 
 NonEmptyPowerset(s) == (SUBSET s \ {{}})
 
@@ -155,7 +155,7 @@ SnapshotProcessing ==
 
                             \/  \* Complete snapshot
                                 /\ snapshot.status = "in_progress"
-                                /\ snapshot.start_timestamp + MaxSnapshotTime <= current_timestamp
+                                /\ current_timestamp < snapshot.start_timestamp + MaxSnapshotTime
                                 /\ snapshot.index_blob_to_be_flushed = {} \* There is nothing to be flushed
                                 /\  LET updated_snapshot == [snapshot EXCEPT !.status = "completed"]
                                     IN  /\ UNCHANGED <<index_blobs, current_timestamp, gcs>>
@@ -167,20 +167,23 @@ SnapshotProcessing ==
                                     IN  /\ snapshots' = (snapshots (+) SetToBag({updated_snapshot})) (-) SetToBag({snapshot})
                                         /\ UNCHANGED <<index_blobs, current_timestamp, gcs>>
 
+UnusedContentIDs(idx_blobs, snaps) == {content_id \in ContentIDs(idx_blobs):
+                                                /\ ~ GetContentInfo(idx_blobs, content_id).deleted} \ UNION{snap.contents_written: snap \in snaps}
+
 \* TriggerGC stores a point in time view of snapshots and the global index_blobs in the GC process record.
 \* Consider only completed snapshots in TriggerGC, this helps in reducing state space. Reasoning - If all snapshots were kept in the GC process record,
 \* two states with GC processes having the same set of completed snapshots but different set of non-completed snapshots would be differentiated,
 \* even though the behaviour following those states won't be affected by the non-completed snapshots stored in the GC record (GC doesn't use the
 \* information in non-completed records).
+
+\* Consider only content_info entries which are old enough. Do it in Trigger instead of habing a check in UnusedContentIDs (to
+\* reduce state space).
 TriggerGC ==
-              gcs' = gcs (+) SetToBag({[snapshots |-> {snap \in BagToSet(snapshots): snap.status = "completed"},
-                                        index_blobs |-> index_blobs,
+              /\ gcs' = gcs (+) SetToBag({[snapshots |-> {snap \in BagToSet(snapshots): snap.status = "completed"},
+                                        index_blobs |-> {content_info \in index_blobs: current_timestamp >= (content_info.timestamp + MaxSnapshotTime)},
                                         contents_deleted |-> {},
                                         deletions_to_be_flushed |-> {}
                                        ]})
-
-UnusedContentIDs(idx_blobs, snaps) == {content_id \in ContentIDs(idx_blobs):
-                                                /\ ~ GetContentInfo(idx_blobs, content_id).deleted} \ UNION{snap.contents_written: snap \in snaps}
 
 DeleteContents(gc) == /\ \E content_ids_to_delete \in
                               NonEmptyPowerset(UnusedContentIDs(gc.index_blobs, gc.snapshots) \ {content_info.content_id : content_info \in gc.contents_deleted}):
@@ -203,32 +206,33 @@ GC_Processing == \/
                     /\ BagCardinality(gcs) < MaxGCsIssued
                     /\ TriggerGC
                     /\ UNCHANGED <<snapshots, index_blobs, current_timestamp>>
-\*                 \/
-\*                    \* Delete some contents which are in the index blobs, but not referenced by the snapshots.
-\*                    /\ \E gc \in BagToSet(gcs):
-\*                        /\ DeleteContents(gc)
-\*                        /\ UNCHANGED <<snapshots, index_blobs, current_timestamp>>
-\*                 \/ \* Flush index blob of deleted entries
-\*                    /\ \E gc \in BagToSet(gcs):
-\*                        /\ gc.deletions_to_be_flushed # {}
-\*                        /\ FlushDeletedContents(gc)
-\*                        /\ UNCHANGED <<snapshots, current_timestamp>>
+                 \/
+                    \* Delete some contents which are in the index blobs, but not referenced by the snapshots.
+                    /\ \E gc \in BagToSet(gcs):
+                        /\ DeleteContents(gc)
+                        /\ UNCHANGED <<snapshots, index_blobs, current_timestamp>>
+                 \/ \* Flush index blob of deleted entries
+                    /\ \E gc \in BagToSet(gcs):
+                        /\ gc.deletions_to_be_flushed # {}
+                        /\ FlushDeletedContents(gc)
+                        /\ UNCHANGED <<snapshots, current_timestamp>>
 
 KopiaNext == \/ 
                 /\ SnapshotProcessing
-                /\ actionPreformedInTimestep' = TRUE
              \/
                 /\ GC_Processing
-                /\ actionPreformedInTimestep' = TRUE
-             \/ \* Tick time forward. Increment logical time only if some state change occured in the time step. If not, don't increment.
-                \* This trick helps reduce state space, while not missing out on important behaviours (we don't need to consider no-op behaviours). 
+             \/
+                \* Tick time forward.
                 /\ current_timestamp < MaxLogicalTime
-                /\ actionPreformedInTimestep = TRUE
                 /\ current_timestamp' = current_timestamp + 1
-                /\ actionPreformedInTimestep' = FALSE
                 /\ UNCHANGED <<index_blobs, snapshots, gcs>>
-                \* /\ Print("Tick time forward", TRUE)
+
+GCInvariant == /\ \A snap \in {snap \in BagToSet(snapshots): snap.status = "completed"}:
+                  /\ \A content_id \in snap.contents_written:
+                     /\ HasContentInfo(index_blobs, content_id)
+                     /\ ~ GetContentInfo(index_blobs, content_id).deleted
+
 =============================================================================
 \* Modification History
-\* Last modified Mon Apr 13 00:26:44 CDT 2020 by pkj
+\* Last modified Mon Apr 13 21:56:43 CDT 2020 by pkj
 \* Created Fri Apr 10 15:50:28 CDT 2020 by pkj
