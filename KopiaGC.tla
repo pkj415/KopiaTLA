@@ -80,13 +80,17 @@ HasContentInfo(idx_blobs, content_id) == LET matching_content_infos == {
 
 \* An index blob will have just one entry for each content ID. It can't have more than one. If this assumption breaks, change this logic.
 \* Call this only if HasContentInfo is TRUE.
-\* TODO - Also, in case a deleted entry is present along with a normal entry at the same timestamp, consider
-\* the non-deleted one.
 GetContentInfo(idx_blobs, content_id) ==
                                         LET matching_content_infos == {
                                                 content_info \in idx_blobs: content_info.content_id = content_id}
-                                        IN CHOOSE content_info \in matching_content_infos:
-                                                \A c \in matching_content_infos: c.timestamp <= content_info.timestamp
+                                            max_timestamp == CHOOSE timestamp \in {content_info.timestamp: content_info \in matching_content_infos}:
+                                                                \A content_info \in matching_content_infos: timestamp >= content_info.timestamp
+                                            latest_matching_content_infos == {
+                                                content_info \in matching_content_infos: content_info.timestamp = max_timestamp}
+                                        IN IF \E content_info \in latest_matching_content_infos: content_info.deleted = FALSE
+                                           THEN CHOOSE content_info \in matching_content_infos:
+                                                    content_info.deleted = FALSE
+                                           ELSE CHOOSE content_info \in matching_content_infos: TRUE
 
 \* Define set of all content IDs in the idx_blobs irrespective of whether they are deleted or not.
 ContentIDs(idx_blobs) == {content_info.content_id: content_info \in idx_blobs}
@@ -232,6 +236,8 @@ KopiaNext == \/
                 /\ current_timestamp' = current_timestamp + 1
                 /\ UNCHANGED <<index, snapshots, gcs>>
 
+(* Invariants and safety check *)
+
 GCInvariant ==  \A snap \in {snap \in BagToSet(snapshots): snap.status = "completed"}:
                   /\ \A content_id \in snap.contents_written:
                      /\ HasContentInfo(index, content_id)
@@ -252,5 +258,5 @@ GetContentInfoCheck2 == ~ \E content1, content2 \in index:
 
 =============================================================================
 \* Modification History
-\* Last modified Sat Apr 18 16:36:29 CDT 2020 by pkj
+\* Last modified Sat Apr 18 16:39:06 CDT 2020 by pkj
 \* Created Fri Apr 10 15:50:28 CDT 2020 by pkj
