@@ -11,6 +11,8 @@
 
 *)
 
+\* TODO - A deleted content entry can get removed during small index compaction if the entry is older than SkipDeletedOlderThan
+
 EXTENDS Integers, Sequences, FiniteSets, Bags, TLC
 
 CONSTANT
@@ -143,6 +145,7 @@ SnapshotProcessing ==
                         /\ \E snapshot \in BagToSet(snapshots):
 
                             \/  \* Write some contents to a blob
+                                \* TODO - Should this be allowed post snapshot.start_timestamp + MaxSnapshotTime?
                                 /\ snapshot.status = "in_progress"
                                 /\ WriteContents(snapshot)
                                 /\ UNCHANGED <<index, current_timestamp, gcs>>
@@ -176,8 +179,8 @@ UnusedContentIDs(idx_blobs, snaps) == {content_id \in ContentIDs(idx_blobs):
 \* even though the behaviour following those states won't be affected by the non-completed snapshots stored in the GC record (GC doesn't use the
 \* information in non-completed records).
 
-\* Consider only content_info entries which are old enough. Do it in Trigger instead of habing a check in UnusedContentIDs (to
-\* reduce state space).
+\* Consider only content_info entries which are old enough. Do it in Trigger instead of having a check in UnusedContentIDs (to
+\* reduce state space). Here MaxSnapshotTime acts analogous to minContentAge in actual code.
 TriggerGC ==
               /\ gcs' = gcs (+) SetToBag({[snapshots |-> {snap \in BagToSet(snapshots): snap.status = "completed"},
                                         index |-> {content_info \in index: current_timestamp >= (content_info.timestamp + MaxSnapshotTime)},
@@ -185,6 +188,8 @@ TriggerGC ==
                                         deletions_to_be_flushed |-> {}
                                        ]})
 
+\* TODO - If content iteration is in some specific order, the state space can be reduced. Right now the specification allows
+\* deletion in any order.
 DeleteContents(gc) == /\ \E content_ids_to_delete \in
                               NonEmptyPowerset(UnusedContentIDs(gc.index, gc.snapshots) \ {content_info.content_id : content_info \in gc.contents_deleted}):
                                 LET contents_to_delete == [content_id: content_ids_to_delete, timestamp: {current_timestamp}, deleted: {TRUE}]
@@ -227,12 +232,25 @@ KopiaNext == \/
                 /\ current_timestamp' = current_timestamp + 1
                 /\ UNCHANGED <<index, snapshots, gcs>>
 
-GCInvariant == /\ \A snap \in {snap \in BagToSet(snapshots): snap.status = "completed"}:
+GCInvariant ==  \A snap \in {snap \in BagToSet(snapshots): snap.status = "completed"}:
                   /\ \A content_id \in snap.contents_written:
                      /\ HasContentInfo(index, content_id)
                      /\ ~ GetContentInfo(index, content_id).deleted
 
+GetContentInfoCheck == ~ \E content1, content2 \in index:
+                           /\ content1 # content2
+                           /\ content1.content_id = content2.content_id
+                           /\ content1.deleted = TRUE
+                           /\ content2.deleted = FALSE
+                           /\ GetContentInfo(index, content1.content_id).deleted = TRUE
+
+GetContentInfoCheck2 == ~ \E content1, content2 \in index:
+                           /\ content1 # content2
+                           /\ content1.content_id = content2.content_id
+                           /\ content1.timestamp < content2.timestamp
+                           /\ GetContentInfo(index, content1.content_id) = content1
+
 =============================================================================
 \* Modification History
-\* Last modified Tue Apr 14 10:11:29 CDT 2020 by pkj
+\* Last modified Sat Apr 18 16:36:29 CDT 2020 by pkj
 \* Created Fri Apr 10 15:50:28 CDT 2020 by pkj
