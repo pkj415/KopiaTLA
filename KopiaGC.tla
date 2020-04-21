@@ -47,7 +47,7 @@ VARIABLES
                 [
                     snapshots |-> Point in time view of the snapshots in the repository. Populated when this GC is triggered.
                     index |-> Point in time view of the global index.
-                    contents_deleted |-> {[content_id |-> 0, deleted |-> TRUE, timestamp |-> 0]},
+                    contents_deleted |-> set of deleted content ids,
                     deletions_to_be_flushed |-> index blob of deletion entries that can be flushed to global index
                 ]
             }
@@ -195,9 +195,9 @@ TriggerGC ==
 \* TODO - If content iteration is in some specific order, the state space can be reduced. Right now the specification allows
 \* deletion in any order.
 DeleteContents(gc) == /\ \E content_ids_to_delete \in
-                              NonEmptyPowerset(UnusedContentIDs(gc.index, gc.snapshots) \ {content_info.content_id : content_info \in gc.contents_deleted}):
+                              NonEmptyPowerset(UnusedContentIDs(gc.index, gc.snapshots) \ gc.contents_deleted): \* Earlier gc.content_deleted was a set of contents and not content ids. That wasn't required and leads to a larger state space. TODO - Ponder on this.
                                 LET contents_to_delete == [content_id: content_ids_to_delete, timestamp: {current_timestamp}, deleted: {TRUE}]
-                                    updated_gc == [gc EXCEPT !.contents_deleted = gc.contents_deleted \cup contents_to_delete,
+                                    updated_gc == [gc EXCEPT !.contents_deleted = gc.contents_deleted \cup {content.content_id: content \in contents_to_delete},
                                                              !.deletions_to_be_flushed = gc.deletions_to_be_flushed \cup contents_to_delete]
                                 IN
                                     /\ gcs' = (gcs (-) SetToBag({gc})) (+) SetToBag({updated_gc})
