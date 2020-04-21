@@ -248,6 +248,7 @@ GCInvariant ==  \A snap \in {snap \in BagToSet(snapshots): snap.status = "comple
 GetContentInfoCheck == ~ \E content1, content2 \in index:
                            /\ content1 # content2
                            /\ content1.content_id = content2.content_id
+                           /\ content1.timestamp = content2.timestamp
                            /\ content1.deleted = TRUE
                            /\ content2.deleted = FALSE
                            /\ GetContentInfo(index, content1.content_id).deleted = TRUE
@@ -256,9 +257,9 @@ GetContentInfoCheck2 == ~ \E content1, content2 \in index:
                            /\ content1 # content2
                            /\ content1.content_id = content2.content_id
                            /\ content1.timestamp < content2.timestamp
-                           /\ GetContentInfo(index, content1.content_id) = content2
+                           /\ GetContentInfo(index, content1.content_id) = content1
 
 =============================================================================
 \* Modification History
-\* Last modified Tue Apr 21 14:10:10 CDT 2020 by pkj
+\* Last modified Tue Apr 21 15:01:15 CDT 2020 by pkj
 \* Created Fri Apr 10 15:50:28 CDT 2020 by pkj
