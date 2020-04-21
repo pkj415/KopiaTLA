@@ -198,7 +198,7 @@ DeleteContents(gc) == /\ \E content_ids_to_delete \in
                               NonEmptyPowerset(UnusedContentIDs(gc.index, gc.snapshots) \ {content_info.content_id : content_info \in gc.contents_deleted}):
                                 LET contents_to_delete == [content_id: content_ids_to_delete, timestamp: {current_timestamp}, deleted: {TRUE}]
                                     updated_gc == [gc EXCEPT !.contents_deleted = gc.contents_deleted \cup contents_to_delete,
-                                                             !.deletions_to_be_flushed = contents_to_delete]
+                                                             !.deletions_to_be_flushed = gc.deletions_to_be_flushed \cup contents_to_delete]
                                 IN
                                     /\ gcs' = (gcs (-) SetToBag({gc})) (+) SetToBag({updated_gc})
 
@@ -258,5 +258,5 @@ GetContentInfoCheck2 == ~ \E content1, content2 \in index:
 
 =============================================================================
 \* Modification History
-\* Last modified Sat Apr 18 16:39:06 CDT 2020 by pkj
+\* Last modified Mon Apr 20 22:13:10 CDT 2020 by pkj
 \* Created Fri Apr 10 15:50:28 CDT 2020 by pkj
