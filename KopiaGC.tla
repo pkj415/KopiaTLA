@@ -94,6 +94,8 @@ GetContentInfo(idx_blobs, content_id) ==
 \* Define set of all content IDs in the idx_blobs irrespective of whether they are deleted or not.
 ContentIDs(idx_blobs) == {content_info.content_id: content_info \in idx_blobs}
 
+\* Either of the implementations of MergeIndices can be used. The first one compacts on the fly.
+
 \* TODO - Handle the case where a deleted entry has the same timestamp as a normal entry for a given content ID. Or maybe don't handle it and leave it
 \* as is? If left as is, at a single timestamp there can be a deleted and a normal entry for a single content ID. We can should the normal entry.
 \*MergeIndices(idx_blobs_1, idx_blobs_2) == {content_info \in idx_blobs_1 \cup idx_blobs_2:
@@ -239,6 +241,11 @@ KopiaNext == \/
                 /\ UNCHANGED <<index, snapshots, gcs>>
 
 (* Invariants and safety check *)
+
+\* TODO - In this specification a content being marked as deleted is as good as the content not existing i.e., removed by compaction (Stmnt A). This is different
+\* from what deletion means in the GC2 spec (which is the actual meaning of the deleted=True marker on a content info) (Stmnt B).
+\* Actually, I have written this spec with the meaning of stmnt A in mind. This doesn't change anything for us, but for clarity, I will refactor later to
+\* indicate the true meaning as per Kopia code i.e., Stmnt B.
 
 GCInvariant ==  \A snap \in {snap \in BagToSet(snapshots): snap.status = "completed"}:
                   /\ \A content_id \in snap.contents_written:
