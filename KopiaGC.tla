@@ -96,13 +96,16 @@ ContentIDs(idx_blobs) == {content_info.content_id: content_info \in idx_blobs}
 
 \* TODO - Handle the case where a deleted entry has the same timestamp as a normal entry for a given content ID. Or maybe don't handle it and leave it
 \* as is? If left as is, at a single timestamp there can be a deleted and a normal entry for a single content ID. We can should the normal entry.
-MergeIndices(idx_blobs_1, idx_blobs_2) == {content_info \in idx_blobs_1 \cup idx_blobs_2:
-                                             /\
-                                                \/ ~ HasContentInfo(idx_blobs_1, content_info.content_id)
-                                                \/ GetContentInfo(idx_blobs_1, content_info.content_id).timestamp <= content_info.timestamp
-                                             /\
-                                                \/ ~ HasContentInfo(idx_blobs_2, content_info.content_id)
-                                                \/ GetContentInfo(idx_blobs_2, content_info.content_id).timestamp <= content_info.timestamp}
+\*MergeIndices(idx_blobs_1, idx_blobs_2) == {content_info \in idx_blobs_1 \cup idx_blobs_2:
+\*                                             /\
+\*                                                \/ ~ HasContentInfo(idx_blobs_1, content_info.content_id)
+\*                                                \/ GetContentInfo(idx_blobs_1, content_info.content_id).timestamp <= content_info.timestamp
+\*                                             /\
+\*                                                \/ ~ HasContentInfo(idx_blobs_2, content_info.content_id)
+\*                                                \/ GetContentInfo(idx_blobs_2, content_info.content_id).timestamp <= content_info.timestamp}
+
+\* TODO - For now keeping MergeIndcies a simple union. If possible, check the above commented version and use it.
+MergeIndices(idx_blobs_1, idx_blobs_2) == idx_blobs_1 \cup idx_blobs_2
 
 (* A thought (mostly incorrect) -
 \* The case of a snapshot process being past its max time limit doesn't require explicit specification, it is as good as a smaller snapshot being completed
@@ -253,7 +256,7 @@ GetContentInfoCheck2 == ~ \E content1, content2 \in index:
                            /\ content1 # content2
                            /\ content1.content_id = content2.content_id
                            /\ content1.timestamp < content2.timestamp
-                           /\ GetContentInfo(index, content1.content_id) = content1
+                           /\ GetContentInfo(index, content1.content_id) = content2
 
 =============================================================================
 \* Modification History
