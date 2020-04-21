@@ -88,9 +88,8 @@ GetContentInfo(idx_blobs, content_id) ==
                                             latest_matching_content_infos == {
                                                 content_info \in matching_content_infos: content_info.timestamp = max_timestamp}
                                         IN IF \E content_info \in latest_matching_content_infos: content_info.deleted = FALSE
-                                           THEN CHOOSE content_info \in matching_content_infos:
-                                                    content_info.deleted = FALSE
-                                           ELSE CHOOSE content_info \in matching_content_infos: TRUE
+                                           THEN CHOOSE content_info \in latest_matching_content_infos: content_info.deleted = FALSE
+                                           ELSE CHOOSE content_info \in latest_matching_content_infos: TRUE
 
 \* Define set of all content IDs in the idx_blobs irrespective of whether they are deleted or not.
 ContentIDs(idx_blobs) == {content_info.content_id: content_info \in idx_blobs}
@@ -258,5 +257,5 @@ GetContentInfoCheck2 == ~ \E content1, content2 \in index:
 
 =============================================================================
 \* Modification History
-\* Last modified Mon Apr 20 22:13:10 CDT 2020 by pkj
+\* Last modified Tue Apr 21 14:10:10 CDT 2020 by pkj
 \* Created Fri Apr 10 15:50:28 CDT 2020 by pkj
