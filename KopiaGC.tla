@@ -234,6 +234,14 @@ TriggerGCMark == /\ gc_marks' = gc_marks (+) SetToBag({[snapshots |-> {snap \in 
 
 \* TODO - If content iteration is in some specific order, the state space can be reduced. Right now the specification allows
 \* deletion in any order.
+
+\* Gap in spec and impl -
+\* Right now the spec doesn't follow the iterator model (as in the impl) and allows picking any contents for deletion
+\* which are to be deleted (selection model). Also, it allows cases of selection on the updated contents as compared to iteration
+\* which iterates on a snapshot of the contents (Not exactly a strict snapshot, but a snapshot of the uncommitted contents is created and
+\* then iterated on and then a snapshot of the commited contents is iterated on). But these details don't affect the selection/iteration model
+\* as we are only adding deletion entries which are skipped in the selection/iteration process anyway.
+
 DeleteContents(gc_mark) == /\ \E content_ids_to_delete \in NonEmptyPowerset(UnusedContentIDs(gc_mark.index, gc_mark.snapshots) \ gc_mark.contents_deleted):
                                 \* Earlier gc.content_deleted was a set of contents and not content ids. That wasn't required and leads to a larger state space. TODO - Ponder on this.
                                 LET contents_to_delete == [content_id: content_ids_to_delete, timestamp: {current_timestamp}, deleted: {TRUE}]
@@ -350,10 +358,10 @@ GC_Repair_Discard == \/
                                 /\ repair_discard.stage = "populated_content_ids_to_discard"
                                 /\ Discard(repair_discard)
                                 /\ UNCHANGED <<snapshots, current_timestamp, gc_marks, gc_mark_manifests>>
-                             \/ \* Remove manifests if all contents to be removed in the discard phase have been removed
-                                /\ repair_discard.stage = "populated_content_ids_to_discard"
-                                /\ RemoveManifests(repair_discard)
-                                /\ UNCHANGED <<snapshots, current_timestamp, gc_marks, index, gc_repair_discards>>
+\*                             \/ \* Remove manifests if all contents to be removed in the discard phase have been removed
+\*                                /\ repair_discard.stage = "populated_content_ids_to_discard"
+\*                                /\ RemoveManifests(repair_discard)
+\*                                /\ UNCHANGED <<snapshots, current_timestamp, gc_marks, index, gc_repair_discards>>
 
 KopiaNext == \/
                 /\ SnapshotProcessing
@@ -394,5 +402,5 @@ GetContentInfoCheck2 == ~ \E content1, content2 \in index:
 
 =============================================================================
 \* Modification History
-\* Last modified Fri May 01 07:59:58 CDT 2020 by pkj
+\* Last modified Fri May 01 12:05:50 CDT 2020 by pkj
 \* Created Fri Apr 10 15:50:28 CDT 2020 by pkj
