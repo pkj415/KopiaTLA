@@ -1,5 +1,11 @@
 ------------------------------ MODULE KopiaGC ------------------------------
 (*
+    This is a spec to model behaviours of the interaction of Snapshot and GC processes in Kopia based on Julio's proposal of saving
+    mark manifests and having a separate Repair & Discard phase.
+
+    It is based out of my understanding of the code as of this commit in Julio's Kopia repo -
+        https://github.com/julio-lopez/kopia/commit/132f823d4f1a321c88cdd5a4a880441800ef1c49
+
     General rules of thumb - Avoid using sequences where possible, using sets/bags can reduce state space.
 
     Things to possibly consider later -
@@ -388,5 +394,5 @@ GetContentInfoCheck2 == ~ \E content1, content2 \in index:
 
 =============================================================================
 \* Modification History
-\* Last modified Fri May 01 07:44:23 CDT 2020 by pkj
+\* Last modified Fri May 01 07:59:58 CDT 2020 by pkj
 \* Created Fri Apr 10 15:50:28 CDT 2020 by pkj
