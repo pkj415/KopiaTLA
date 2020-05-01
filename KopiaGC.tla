@@ -1,5 +1,8 @@
 ------------------------------ MODULE KopiaGC ------------------------------
 (*
+    This is a spec to model behaviours of the interaction of Snapshot and GC processes in Kopia.
+    It is based out of my understanding of the code as of this commit - 9c3d419bc396c0446f21c68813ca195196843eab
+
     General rules of thumb - Avoid using sequences where possible, using sets/bags can reduce state space.
 
     Things to possibly consider later -
@@ -268,5 +271,5 @@ GetContentInfoCheck2 == ~ \E content1, content2 \in index:
 
 =============================================================================
 \* Modification History
-\* Last modified Tue Apr 21 15:01:15 CDT 2020 by pkj
+\* Last modified Fri May 01 07:56:47 CDT 2020 by pkj
 \* Created Fri Apr 10 15:50:28 CDT 2020 by pkj
