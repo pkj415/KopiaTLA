@@ -1,6 +1,28 @@
 ---
 layout: page
 title: TLA+ for Kopia
+
+images:
+  - image: /assets/images/Img.002.png
+  - image: /assets/images/Img.003.png
+  - image: /assets/images/Img.004.png
+  - image: /assets/images/Img.005.png
+  - image: /assets/images/Img.006.png
+  - image: /assets/images/Img.007.png
+  - image: /assets/images/Img.008.png
+  - image: /assets/images/Img.009.png
+  - image: /assets/images/Img.010.png
+  - image: /assets/images/Img.011.png
+  - image: /assets/images/Img.012.png
+  - image: /assets/images/Img.013.png
+  - image: /assets/images/Img.014.png
+  - image: /assets/images/Img.015.png
+  - image: /assets/images/Img.016.png
+  - image: /assets/images/Img.017.png
+  - image: /assets/images/Img.018.png
+  - image: /assets/images/Img.019.png
+  - image: /assets/images/Img.020.png
+  - image: /assets/images/Img.021.png
 ---
 
 Apart from this, there is a snapshot and backup tool - Kopia. The garbage collector module in Kopia was known to have correctness issues and there is a new design proposed by Julio and Jarek to solve this issue. However, the new design also violates correctness guarantees and I describe that work here.
@@ -22,7 +44,7 @@ Kopia stores its data in a data structure called *Repository*. The atomic unit o
 
 Tieing it all up, a repository contains index blobs and data blobs. The data blobs contain contents which are referenced by entries in the index blobs. Keep in mind that in all figures, the content id (such as C4) is some hash of the content data that is written in the content. The content id provides content-addresability i.e., any snapshot process can reuse the content already written earlier (perhaps by another snapshot process) by searching for the content data to be written using the hash of the content data. All index entries for a data blob will be found in the same index blob. Below is a sample depiction of three data blobs and 2 index blobs in a repository.
 
-![](Image 1.tif "Organization of contents, index blobs and data blobs")
+![](/assets/images/index_and_data_blobs.png "Organization of contents, index blobs and data blobs")
 
 ## Processes in Kopia
 
@@ -43,6 +65,8 @@ Completion of a snapshot results in some metadata entry added atomically to the 
 A snapshot can also later be deleted. Deletion of a snapshot results in the metadata entry of the snapshot being deleted.
 
 The following image slide shows a starting state of the repository with no data blobs and no index blobs. There are two snapshot creation processess which are started one after the other. The first snapshot process S1 intends to write some contents {C45, C46, C47} and the process starts at timestamp 0. It writes one data blob with contents C45 & C46 and writes in an index blob with the corresponding index entries. Later another snapshot process S2 which intends to write the contents {C45, C46, C47, C48} is triggered and it reads a point in time view of index entries from the index blob. It finds contents C45 & C46 already in the local index entries set and so doesn't add them to the local data blob for writing. However, after this the first snapshot process S1 writes another data blob with content C47, flushes the index blob and marks itself completed. But S2 isn't aware of this new index entry as the local set of index entries are populated only at the start of snapshotting process. So it writes a data blob with the content C47 & C48. C47 is now present in two data blobs with two different index entries in separate index blobs pointing to the respective data blob contents. Having two copies of the same content just consumes space and is useless. Post this snapshot S2 is deleted and so content C48 is useless as well. It is the task of the garbage collection module (in conjunction with index compaction and blob compation) to delete any unused contents & corresponding index entries to free space.
+
+{% include carousel.html height="50" unit="%" duration="7" %}
 
 #### Garbage collection, index compaction and blob compaction
 

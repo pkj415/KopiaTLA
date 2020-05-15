@@ -9,3 +9,8 @@ code {
 a code {
   color: #08c;
 }
+
+p {
+  text-align: justify;
+  text-justify: inter-word;
+}

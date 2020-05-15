@@ -3,8 +3,6 @@ layout: page
 title: TLA+ for ViewStamped Repilcation, PBFT and Kopia's Garbage collection protocol
 ---
 
-# Introduction
-
 This project page describes my work on specifying behaviours in TLA+ and checking correctness for distributed protocols and concurrent systems using the TLC model checker. This is done for two well-known distributed protocols for consensus and for a non-quiescent garbage collection process [^1] in a filesystem backup & restore tool (Kopia). Only safety is verified for the two consensus protocols are - ViewStamped Replication (VR) and Practical Byzantine Fault Tolerance (PBFT), since it has been proven that liveness cannot be guaranteed by any consensus protocol [^3]. VR remains safe in face of non-byzantine failures (upto n/2 failures in a network of n processes) while PBFT remains safe even in case of byzantine failrues (upto n/3 failures in a network of n processes). The TLA+ spec (short for specification) for VR proves safety of the protocol as specified in the VR paper[^2] (with the exclusion of the reconfiguration protocol). The spec for PBFT is in progress; the section on PBFT's spec describes how safety will be guaranteed. Finally, model checking is used to identify safety violations in the design of Kopia's garbage collection (abbreviated GC) protocol to refine the design and conclude on a safe protocol. Liveness of the protocol is not touched upon as it is trivial to argue to about liveness in the GC protocol.
 
 A side note - I will try to not be sloppy in terminology as much as possible to avoid ambiguity. Also, most of the terminology is derived from the TLA+ (what does dervied from TLA+ mean?).

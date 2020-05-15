@@ -22,31 +22,6 @@ The state variables include each process' state as describes in the paper and a 
 
 In case of a broadcast message, the message added to the messages set need not contain the "to" field. Any message without a "to" field implicity means that any process can execute a step that captures receiving a broadcast message. This is an example of abstracting away from the lower level implementation in which case the broadcast might require a "to" field.
 
-{% if page.carousel %}
-<div>
-<ul class="slides">
-  {% for slides in page.carousel %}
-  <li>
-    <img src="{{ slides.image }}">
-  </li>
-  {% endfor %}
-</ul>
-</div>
-{% endif %}
-
-<!--{% include carousel.html height="50" unit="%" duration="7" %}-->
-<!--{% if page.carousel %}
-  <div class="flexslider">
-    <ul class="slides">
-      {% for slides in page.carousel %}
-      <li>
-        <img src="{{ slides.image }}">
-      </li>
-      {% endfor %}
-    </ul>
-  </div>
-  {% endif %}-->
-
 ## Safety conditions -
 
 To verify safety, we check if the specification implements the [LinearizableOrdering](https://github.com/pkj415/ViewStamped-Replication-TLA/blob/master/LinearizableOrdering.tla) specification. The LinearizableOrdering specification is a "what" specification while the spec for ViewStamped Replication is a "how" specification. The LinearizableOrdering specification just has a state variable ordering which represents a tuple (i.e., an ordered sequence) of client commands. The only step possible in this specification is to extend ordering by a sequence of client commands which are not already in the tuple. The ViewStamped Replication protocol intends to acheive this - any behaviour should appear to be a behaviour of the LinearizableOrdering spec i.e., client commands are executed in some order and the order can only be extended (client commands already part of the externally visible ordering can't be changed/ removed and new client commands can't appear anywhere in between an ordering). The "what" specification is named Linearizable because VR is intended to acheive Linearizable consistency. The ordering in the specification represents the visiblity/ arbitration/ returns before order as defined by Linearizability in [^3] and the ordering variable in the VR spec represents the arbitration order. And in VR, since each client request is executed based on the application state present after executing previous requests, the effect of the previous client requests is visible to any request being executed. And hence, the visibility order is the same as the arbitration order. is the same as the ordering. Also, the returns before ordering has to be a subset of the arbitration ordering for Linearizability and this is ensured in VR by the the fact that a response is issued for a client request only after it has committed and hence, any other request which comes later in the returns before ordering will surely be executed after the request earlier in the rb ordering.
