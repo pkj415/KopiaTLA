@@ -3,26 +3,26 @@ layout: page
 title: TLA+ for Kopia
 
 images:
-  - image: /assets/images/Img.002.png
-  - image: /assets/images/Img.003.png
-  - image: /assets/images/Img.004.png
-  - image: /assets/images/Img.005.png
-  - image: /assets/images/Img.006.png
-  - image: /assets/images/Img.007.png
-  - image: /assets/images/Img.008.png
-  - image: /assets/images/Img.009.png
-  - image: /assets/images/Img.010.png
-  - image: /assets/images/Img.011.png
-  - image: /assets/images/Img.012.png
-  - image: /assets/images/Img.013.png
-  - image: /assets/images/Img.014.png
-  - image: /assets/images/Img.015.png
-  - image: /assets/images/Img.016.png
-  - image: /assets/images/Img.017.png
-  - image: /assets/images/Img.018.png
-  - image: /assets/images/Img.019.png
-  - image: /assets/images/Img.020.png
-  - image: /assets/images/Img.021.png
+  - image: {{ BASE_PATH }}/assets/images/Img.002.png
+  - image: {{ BASE_PATH }}/assets/images/Img.003.png
+  - image: {{ BASE_PATH }}/assets/images/Img.004.png
+  - image: {{ BASE_PATH }}/assets/images/Img.005.png
+  - image: {{ BASE_PATH }}/assets/images/Img.006.png
+  - image: {{ BASE_PATH }}/assets/images/Img.007.png
+  - image: {{ BASE_PATH }}/assets/images/Img.008.png
+  - image: {{ BASE_PATH }}/assets/images/Img.009.png
+  - image: {{ BASE_PATH }}/assets/images/Img.010.png
+  - image: {{ BASE_PATH }}/assets/images/Img.011.png
+  - image: {{ BASE_PATH }}/assets/images/Img.012.png
+  - image: {{ BASE_PATH }}/assets/images/Img.013.png
+  - image: {{ BASE_PATH }}/assets/images/Img.014.png
+  - image: {{ BASE_PATH }}/assets/images/Img.015.png
+  - image: {{ BASE_PATH }}/assets/images/Img.016.png
+  - image: {{ BASE_PATH }}/assets/images/Img.017.png
+  - image: {{ BASE_PATH }}/assets/images/Img.018.png
+  - image: {{ BASE_PATH }}/assets/images/Img.019.png
+  - image: {{ BASE_PATH }}/assets/images/Img.020.png
+  - image: {{ BASE_PATH }}/assets/images/Img.021.png
 ---
 
 Apart from this, there is a snapshot and backup tool - Kopia. The garbage collector module in Kopia was known to have correctness issues and there is a new design proposed by Julio and Jarek to solve this issue. However, the new design also violates correctness guarantees and I describe that work here.
@@ -44,7 +44,7 @@ Kopia stores its data in a data structure called *Repository*. The atomic unit o
 
 Tieing it all up, a repository contains index blobs and data blobs. The data blobs contain contents which are referenced by entries in the index blobs. Keep in mind that in all figures, the content id (such as C4) is some hash of the content data that is written in the content. The content id provides content-addresability i.e., any snapshot process can reuse the content already written earlier (perhaps by another snapshot process) by searching for the content data to be written using the hash of the content data. All index entries for a data blob will be found in the same index blob. Below is a sample depiction of three data blobs and 2 index blobs in a repository.
 
-![](/assets/images/index_and_data_blobs.png "Organization of contents, index blobs and data blobs")
+![]({{ BASE_PATH }}/assets/images/index_and_data_blobs.png "Organization of contents, index blobs and data blobs")
 
 ## Processes in Kopia
 
