@@ -19,12 +19,12 @@ CONSTANT
     MaxSnapshotTime, \* Maximum number of logical time steps a snapshot process can take. Post that it will not be able to mark itself "completed".
     MaxLogicalTime, \* Can't keep TLC running forever
     MaxSnapshotProcessesIssued, \* Maximum number of snapshot processes that can be issued. Constraint needed to restrict state space, else TLC will run forever
-    MaxGCMarksIssued, \* Maximum number of GC Mark processes that can be issued.
-    MaxGCRepairDiscardsIssued, \* Maximum number of GC Repair & Discard processes that can be issued.
-    MinGCMarkAge \* Only Mark phases with mark_phase.end_timestamp + MinGCMarkAge <= current_timestamp can be repaired.
+    MaxGCDiscardsIssued, \* Maximum number of GC Discard processes that can be issued.
+    MaxGCRepairDeletesIssued, \* Maximum number of GC Repair & Discard processes that can be issued.
+    MinContentDiscardAge \* Only contents with timestamp + MinContentDiscardAge <= current_timestamp can be discarded.
     (* TODO - Explain how logical time is modeled, and how this field changes the scope of possible behaviours *)
 
-ASSUME MinGCMarkAge >= MaxSnapshotTime \* MinGCMarkAge can only be >= MaxSnapshotTime. That is the protocol.
+\*ASSUME MinContentDiscardAge >= MaxSnapshotTime \* MinContentDiscardAge can only be >= MaxSnapshotTime. That is the protocol.
 
 VARIABLES
         (* Format - Set of content info entries. Not having a bag will not affect safety verification because
@@ -57,47 +57,32 @@ VARIABLES
                 [
                     snapshots |-> Point in time view of the snapshots in the repository. Populated when this GC is triggered.
                     index_entries |-> Point in time view of the global set index_entries.
-                    contents_deleted |-> set of deleted content ids,
-                    next_mark_mainfest_start_time |-> -1, \* When a new batch of contents to be deleted is started, this is set.
-                        It is reset to -1 when a batch of deletes is flushed with the corresponding Mark manifest.
-                    deletions_to_be_flushed |-> index entries of deleted contents that can be flushed to global index_entries
+                    content_ids_to_discard |-> {}
                 ]
             }
         *)
-        gc_marks, \* TODO: Consider deleting gc_marks which have completed because they don't help in the decision of behaviours' path later. Just exploding the state space.
-
-        (*
-            {
-                [
-                    start_timestamp,
-                    end_timestamp,
-                    snapshots |-> snapshots seen,
-                    deletes_flushed |-> content id deletes that were flushed
-                ]
-            }
-        *)
-        gc_mark_manifests,
+        gc_discards, \* TODO: Consider deleting gc_discards which have completed because they don't help in the decision of behaviours' path later. Just exploding the state space.
 
         (*
             {
                 [
                     snapshots |-> Point in time view of the snapshots in the repository,
-                    mark_manifests |-> Set of mark manifests,
                     index_entries |-> Point in time view of the global set index_entries,
-                    stage |-> "start"/ "repaired" / "populated_content_ids_to_discard",
-                    content_ids_to_discard |-> {}
+                    stage |-> "start"/ "repaired" / "populated_content_ids_to_delete",
+                    contents_deleted |-> set of discarded content ids,
+                    deletions_to_be_flushed |-> index entries of deleted contents that can be flushed to global index_entries
+                    start_timestamp
                 ]
             }
         *)
-        gc_repair_discards,
+        gc_repair_deletes,
         current_timestamp
 
 KopiaInit == /\ snapshot_processes = EmptyBag
              /\ current_timestamp = 0
              /\ index_entries = {}
-             /\ gc_marks = EmptyBag
-             /\ gc_mark_manifests = EmptyBag
-             /\ gc_repair_discards = EmptyBag
+             /\ gc_discards = EmptyBag
+             /\ gc_repair_deletes = EmptyBag
 
 NonEmptyPowerset(s) == (SUBSET s \ {{}})
 
@@ -173,141 +158,65 @@ SnapshotProcessing ==
   \/ \* Trigger a snapshot
     /\ BagCardinality(snapshot_processes) < MaxSnapshotProcessesIssued
     /\ TriggerSnapshot
-    /\ UNCHANGED <<index_entries, current_timestamp, gc_marks, gc_mark_manifests, gc_repair_discards>>
+    /\ UNCHANGED <<index_entries, current_timestamp, gc_discards, gc_repair_deletes>>
 
   \/
     /\ \E snapshot \in BagToSet(snapshot_processes):
         \/  \* Write some contents to a blob
             /\ snapshot.status = "in_progress"
             /\ WriteContents(snapshot)
-            /\ UNCHANGED <<index_entries, current_timestamp, gc_marks, gc_mark_manifests, gc_repair_discards>>
+            /\ UNCHANGED <<index_entries, current_timestamp, gc_discards, gc_repair_deletes>>
         
         \/  \* Flush new index_entries
             /\ snapshot.status = "in_progress"
             /\ snapshot.index_entries_to_be_flushed # {}
             /\ FlushNewIndexEntries(snapshot)
-            /\ UNCHANGED <<current_timestamp, gc_marks, gc_mark_manifests, gc_repair_discards>>
+            /\ UNCHANGED <<current_timestamp, gc_discards, gc_repair_deletes>>
         
         \/  \* Complete snapshot
             /\ snapshot.status = "in_progress"
             /\ current_timestamp < snapshot.start_timestamp + MaxSnapshotTime
             /\ snapshot.index_entries_to_be_flushed = {} \* There is nothing to be flushed
             /\ LET updated_snapshot == [snapshot EXCEPT !.status = "completed"]
-               IN  /\ UNCHANGED <<index_entries, current_timestamp, gc_marks, gc_mark_manifests, gc_repair_discards>>
+               IN  /\ UNCHANGED <<index_entries, current_timestamp, gc_discards, gc_repair_deletes>>
                    /\ snapshot_processes' = (snapshot_processes (+) SetToBag({updated_snapshot})) (-) SetToBag({snapshot})
         
         \/  \* Delete a snapshot
             /\ snapshot.status = "completed"
             /\ LET updated_snapshot == [snapshot EXCEPT !.status = "deleted"]
                IN  /\ snapshot_processes' = (snapshot_processes (+) SetToBag({updated_snapshot})) (-) SetToBag({snapshot})
-                   /\ UNCHANGED <<index_entries, current_timestamp, gc_marks, gc_mark_manifests, gc_repair_discards>>
+                   /\ UNCHANGED <<index_entries, current_timestamp, gc_discards, gc_repair_deletes>>
             \* TODO: Since nothing would be used post deletion, try to check if setting all other variables to default value helps in reducing state space.
 
 (***************************************************************************
-    Mark process steps
+    Discard process steps
  ***************************************************************************)
-UnusedContentIDs(idx_entries, snaps) == {content_id \in ContentIDs(idx_entries):
-    /\ ~ GetContentInfo(idx_entries, content_id).deleted} \ UNION{snap.contents_written: snap \in snaps}
+SuccessfulRepairs == {gc_repair_delete \in BagToSet(gc_repair_deletes): gc_repair_delete.stage = "repaired"}
 
-\* TriggerGC stores a point in time view of snapshots and the global set index_entries in the GC process record.
-\* Consider only completed snapshot processes in TriggerGC, this helps in reducing state space. Reasoning - If all snapshot processes were kept in the GC process record,
-\* two states with GC processes having the same set of completed snapshots but different set of non-completed snapshots would be differentiated,
-\* even though the behaviour following those states won't be affected by the non-completed snapshots stored in the GC record (GC doesn't use the
-\* information in non-completed records).
+LatestRepairTimestamp == IF SuccessfulRepairs # {} THEN
+                            CHOOSE timestamp \in {gc_repair_delete.start_timestamp: gc_repair_delete \in SuccessfulRepairs}:
+                                \A gc_repair_delete \in SuccessfulRepairs: timestamp >= gc_repair_delete.start_timestamp
+                         ELSE -1
 
-\* Consider only those index entries which are old enough. Do it in Trigger instead of having a check in UnusedContentIDs (to
-\* reduce state space). Here MaxSnapshotTime acts analogous to minContentAge in actual code.
-TriggerGCMark ==
-    gc_marks' = gc_marks (+) SetToBag({[snapshots |-> {snap \in BagToSet(snapshot_processes): snap.status = "completed"},
-        index_entries |-> {content_info \in index_entries: current_timestamp >= (content_info.timestamp + MaxSnapshotTime)},
-        next_mark_mainfest_start_time |-> -1, \* Batch of contents to be deleted is not yet complete.
-        contents_deleted |-> {},
-        deletions_to_be_flushed |-> {}
-       ]})
-
-\* TODO - If content iteration is in some specific order, the state space can be reduced. Right now the specification allows
-\* deletion in any order.
-DeleteContents(gc_mark) ==
-    \E content_ids_to_delete \in NonEmptyPowerset(UnusedContentIDs(gc_mark.index_entries, gc_mark.snapshots) \ gc_mark.contents_deleted):
-        \* Earlier gc.contents_deleted was a set of contents and not content ids. That wasn't required and leads to a larger state space. TODO - Ponder on this.
-        LET contents_to_delete == [content_id: content_ids_to_delete, timestamp: {current_timestamp}, deleted: {TRUE}]
-            updated_gc_mark == [gc_mark EXCEPT !.contents_deleted = gc_mark.contents_deleted \cup {content.content_id: content \in contents_to_delete},
-                                               !.deletions_to_be_flushed = gc_mark.deletions_to_be_flushed \cup contents_to_delete,
-                                               !.next_mark_mainfest_start_time = IF gc_mark.next_mark_mainfest_start_time = -1 THEN current_timestamp
-                                                                                 ELSE gc_mark.next_mark_mainfest_start_time]
-        IN
-            gc_marks' = (gc_marks (-) SetToBag({gc_mark})) (+) SetToBag({updated_gc_mark})
-
-FlushDeletedContents(gc_mark) ==
-    LET
-        \* No need to update the gc_mark.index_entries like we did for snapshot processes. This is because once a content is deleted by its
-        \* presence in gc_mark.contents_deleted, it will never be checked again in gc_mark.index_entries.
-        updated_gc_mark == [gc_mark EXCEPT !.deletions_to_be_flushed = {},
-                                           !.next_mark_mainfest_start_time = -1]
-    IN
-        /\ gc_marks' = (gc_marks (-) SetToBag({gc_mark})) (+) SetToBag({updated_gc_mark})
-        /\ index_entries' = MergeIndices(index_entries, gc_mark.deletions_to_be_flushed)
-        /\ gc_mark_manifests' = gc_mark_manifests (+) SetToBag({[start_timestamp |-> gc_mark.next_mark_mainfest_start_time,
-               end_timestamp |-> current_timestamp,
-               deletes_flushed |-> {deletion.content_id: deletion \in gc_mark.deletions_to_be_flushed},
-               snapshots |-> gc_mark.snapshots]})
-
-GC_Mark == \/
-              \* Trigger GC Mark phase. Load index_entries and completed snapshot processes (not all, to save on state space) at the current_timestamp.
-              /\ BagCardinality(gc_marks) < MaxGCMarksIssued
-              /\ TriggerGCMark
-              /\ UNCHANGED <<snapshot_processes, index_entries, current_timestamp, gc_mark_manifests, gc_repair_discards>>
-           \/
-              \* Delete some contents which are in index_entries, but not referenced by the snapshots.
-              /\ \E gc_mark \in BagToSet(gc_marks):
-                  /\ DeleteContents(gc_mark)
-                  /\ UNCHANGED <<snapshot_processes, index_entries, current_timestamp, gc_mark_manifests, gc_repair_discards>>
-           \/ \* Flush local index_entries of deleted contents along with a mark manifest
-              /\ \E gc \in BagToSet(gc_marks):
-                  /\ gc.deletions_to_be_flushed # {}
-                  /\ FlushDeletedContents(gc)
-                  /\ UNCHANGED <<snapshot_processes, current_timestamp, gc_repair_discards>>
-
-(***************************************************************************
-    Repair and Discard process steps
- ***************************************************************************)
-TriggerGCRepairDiscard ==
-    gc_repair_discards' = gc_repair_discards (+) SetToBag({[snapshots |-> {snap \in BagToSet(snapshot_processes): snap.status = "completed"},
-        mark_manifests |-> {manifest \in BagToSet(gc_mark_manifests): current_timestamp >= (manifest.end_timestamp + MinGCMarkAge)},
-        index_entries |-> index_entries,
-        stage |-> "start",
+TriggerGCDiscard ==
+    gc_discards' = gc_discards (+) SetToBag({[snapshots |-> {snap \in BagToSet(snapshot_processes): snap.status = "completed"},
+        index_entries |-> {content_info \in index_entries: LatestRepairTimestamp >= (content_info.timestamp + MinContentDiscardAge)},
         content_ids_to_discard |-> {}
        ]})
 
-Repair(repair_discard) ==
+PopulateContentIDsToDiscard(gc_discard) ==
     LET
-        \* Set of snapshots which were not seen by the mark manifests.
-        snapshots_to_check == UNION{repair_discard.snapshots \ manifest.snapshots: manifest \in repair_discard.mark_manifests}
-        contents_to_maybe_repair == UNION{snapshot.contents_written: snapshot \in snapshots_to_check}
-        contents_to_repair == {content_id \in contents_to_maybe_repair:
-                                   /\ HasContentInfo(repair_discard.index_entries, content_id)
-                                   /\ GetContentInfo(repair_discard.index_entries, content_id).deleted = TRUE}
-        index_to_flush == [content_id: contents_to_repair, timestamp: {current_timestamp}, deleted: {FALSE}]
-        updated_repair_discard == [repair_discard EXCEPT !.stage = "repaired"]
+        content_ids_to_discard == {content_id \in ContentIDs(gc_discard.index_entries):
+                                      /\ HasContentInfo(gc_discard.index_entries, content_id)
+                                      /\ GetContentInfo(gc_discard.index_entries, content_id).deleted}
+        updated_gc_discard == [gc_discard EXCEPT !.content_ids_to_discard = content_ids_to_discard]
     IN
-        /\ index_entries' = MergeIndices(index_entries, index_to_flush)
-        /\ gc_repair_discards' = (gc_repair_discards (-) SetToBag({repair_discard})) (+) SetToBag({updated_repair_discard})
+        gc_discards' = (gc_discards (-) SetToBag({gc_discard})) (+) SetToBag({updated_gc_discard})
 
-PopulateContentIDsToDiscard(repair_discard) ==
-    LET
-        marked_content_ids == UNION{manifest.deletes_flushed: manifest \in repair_discard.mark_manifests}
-        content_ids_to_discard == {content_id \in marked_content_ids:
-                                      /\ HasContentInfo(repair_discard.index_entries, content_id)
-                                      /\ GetContentInfo(repair_discard.index_entries, content_id).deleted}
-        updated_repair_discard == [repair_discard EXCEPT !.content_ids_to_discard = content_ids_to_discard,
-                                                         !.stage = "populated_content_ids_to_discard"]
-    IN
-        gc_repair_discards' = (gc_repair_discards (-) SetToBag({repair_discard})) (+) SetToBag({updated_repair_discard})
-
-Discard(repair_discard) ==
+Discard(gc_discard) ==
     LET
         all_contents_to_remove_from_global_index ==
-            {content \in repair_discard.index_entries: content.content_id \in repair_discard.content_ids_to_discard}
+            {content \in gc_discard.index_entries: content.content_id \in gc_discard.content_ids_to_discard}
     IN
         \E contents_to_remove_from_global_index \in NonEmptyPowerset(all_contents_to_remove_from_global_index):
             \* With this we are simulating deletions of chunks of contents in the indices. Contents might be
@@ -319,54 +228,112 @@ Discard(repair_discard) ==
             \* where contents to be discarded from the same index blob are not discarded together.
            /\ index_entries' = index_entries \ contents_to_remove_from_global_index
            /\ LET
-                 updated_repair_discard == [repair_discard EXCEPT !.index_entries = repair_discard.index_entries \ contents_to_remove_from_global_index]
+                 updated_gc_discard == [gc_discard EXCEPT !.index_entries = gc_discard.index_entries \ contents_to_remove_from_global_index]
               IN
-                 gc_repair_discards' = (gc_repair_discards (-) SetToBag({repair_discard})) (+) SetToBag({updated_repair_discard})
+                 gc_discards' = (gc_discards (-) SetToBag({gc_discard})) (+) SetToBag({updated_gc_discard})
 
-\*RemoveManifests(repair_discard) == LET
-\*                                      all_contents_to_remove_from_global_index ==
-\*                                        {content \in repair_discard.index: content.content_id \in repair_discard.content_ids_to_discard}
-\*                                   IN
-\*                                      /\ all_contents_to_remove_from_global_index = {} \* All contents to be discarded have been discarded. Now, delete the mark manifests.
-\*                                      /\ gc_mark_manifests' = gc_mark_manifests (-) repair_discard.mark_manifests
+GC_Discard == \/
+                  \* Trigger GC Discard phase. Load index_entries and completed snapshot processes (not all, to save on state space) at the current_timestamp.
+                  /\ BagCardinality(gc_discards) < MaxGCDiscardsIssued
+                  /\ TriggerGCDiscard
+                  /\ UNCHANGED <<snapshot_processes, index_entries, current_timestamp, gc_repair_deletes>>
+              \/ \E gc_discard \in BagToSet(gc_discards):
+                  \/ \* Populate content IDs to discard
+                      /\ PopulateContentIDsToDiscard(gc_discard)
+                      /\ UNCHANGED <<snapshot_processes, current_timestamp, gc_repair_deletes, index_entries>>
+                  \/ \* Discard contents
+                      /\ Discard(gc_discard)
+                      /\ UNCHANGED <<snapshot_processes, current_timestamp, gc_repair_deletes>>
 
-GC_Repair_Discard ==
+(***************************************************************************
+    Repair and Delete process steps
+ ***************************************************************************)
+TriggerGCRepairDelete ==
+    gc_repair_deletes' = gc_repair_deletes (+) SetToBag({[snapshots |-> {snap \in BagToSet(snapshot_processes): snap.status = "completed"},
+        index_entries |-> index_entries,
+        stage |-> "start",
+        contents_deleted |-> {},
+        deletions_to_be_flushed |-> {},
+        start_timestamp |-> current_timestamp 
+       ]})
+
+Repair(gc_repair_delete) ==
+    LET
+        \* TODO: Can repair happen in a single flush? Check the same for the metadata based implementation.
+        contents_to_maybe_repair == UNION{snapshot.contents_written: snapshot \in gc_repair_delete.snapshots}
+        contents_to_repair == {content_id \in contents_to_maybe_repair:
+                                   /\ HasContentInfo(gc_repair_delete.index_entries, content_id)
+                                   /\ GetContentInfo(gc_repair_delete.index_entries, content_id).deleted = TRUE}
+        index_to_flush == [content_id: contents_to_repair, timestamp: {current_timestamp}, deleted: {FALSE}]
+        updated_repair_delete == [gc_repair_delete EXCEPT !.stage = "repaired"]
+    IN
+        /\ index_entries' = MergeIndices(index_entries, index_to_flush)
+        /\ gc_repair_deletes' = (gc_repair_deletes (-) SetToBag({gc_repair_delete})) (+) SetToBag({updated_repair_delete})
+
+\* Here MaxSnapshotTime acts analogous to minContentAge in actual code.
+UnusedContentIDs(idx_entries, snaps, gc_repair_delete_start_timestamp) == {content_id \in ContentIDs(idx_entries):
+        /\ ~ GetContentInfo(idx_entries, content_id).deleted
+        /\ (gc_repair_delete_start_timestamp >= (GetContentInfo(idx_entries, content_id).timestamp + MaxSnapshotTime))} \ UNION{snap.contents_written: snap \in snaps}
+
+\* TriggerGC stores a point in time view of snapshots and the global set index_entries in the GC process record.
+\* Consider only completed snapshot processes in TriggerGC, this helps in reducing state space. Reasoning - If all snapshot processes were kept in the GC process record,
+\* two states with GC processes having the same set of completed snapshots but different set of non-completed snapshots would be differentiated,
+\* even though the behaviour following those states won't be affected by the non-completed snapshots stored in the GC record (GC doesn't use the
+\* information in non-completed records).
+
+\* TODO - If content iteration is in some specific order, the state space can be reduced. Right now the specification allows
+\* deletion in any order.
+DeleteContents(gc_repair_delete) ==
+    \E content_ids_to_delete \in NonEmptyPowerset(UnusedContentIDs(gc_repair_delete.index_entries, gc_repair_delete.snapshots, gc_repair_delete.start_timestamp) \ gc_repair_delete.contents_deleted):
+        \* Earlier gc_repair_delete.contents_deleted was a set of contents and not content ids. That wasn't required and leads to a larger state space. TODO - Ponder on this.
+        LET contents_to_delete == [content_id: content_ids_to_delete, timestamp: {current_timestamp}, deleted: {TRUE}]
+            updated_gc_repair_delete == [gc_repair_delete EXCEPT !.contents_deleted = gc_repair_delete.contents_deleted \cup {content.content_id: content \in contents_to_delete},
+                                                                 !.deletions_to_be_flushed = gc_repair_delete.deletions_to_be_flushed \cup contents_to_delete]
+        IN
+            gc_repair_deletes' = (gc_repair_deletes (-) SetToBag({gc_repair_delete})) (+) SetToBag({updated_gc_repair_delete})
+
+FlushDeletedContents(gc_repair_delete) ==
+    LET
+        \* No need to update the gc_repair_delete.index_entries like we did for snapshot processes. This is because once a content is deleted by its
+        \* presence in gc_repair_delete.contents_deleted, it will never be checked again in gc_repair_delete.index_entries.
+        updated_gc_repair_delete == [gc_repair_delete EXCEPT !.deletions_to_be_flushed = {}]
+    IN
+        /\ gc_repair_deletes' = (gc_repair_deletes (-) SetToBag({gc_repair_delete})) (+) SetToBag({updated_gc_repair_delete})
+        /\ index_entries' = MergeIndices(index_entries, gc_repair_delete.deletions_to_be_flushed)
+
+GC_Repair_Delete ==
     \/
-        \* Trigger GC Repair and Discard phase. Load the completed snapshot processes and mark manifests (older than the safety threshold mentioned earlier).
-        /\ BagCardinality(gc_repair_discards) < MaxGCRepairDiscardsIssued
-        /\ TriggerGCRepairDiscard
-        /\ UNCHANGED <<snapshot_processes, index_entries, current_timestamp, gc_marks, gc_mark_manifests>>
+        \* Trigger GC Repair and Delete phase. Load the completed snapshot processes and index entries
+        /\ BagCardinality(gc_repair_deletes) < MaxGCRepairDeletesIssued
+        /\ TriggerGCRepairDelete
+        /\ UNCHANGED <<snapshot_processes, index_entries, current_timestamp, gc_discards>>
     \/
-        /\ \E repair_discard \in BagToSet(gc_repair_discards):
+        /\ \E gc_repair_delete \in BagToSet(gc_repair_deletes):
              \/ \* Repair contents
-                /\ repair_discard.stage = "start"
-                /\ Repair(repair_discard)
-                /\ UNCHANGED <<snapshot_processes, current_timestamp, gc_marks, gc_mark_manifests>>
-             \/ \* Populate content IDs to discard
-                /\ repair_discard.stage = "repaired"
-                /\ PopulateContentIDsToDiscard(repair_discard)
-                /\ UNCHANGED <<snapshot_processes, current_timestamp, gc_marks, gc_mark_manifests, index_entries>>
-             \/ \* Discard contents
-                /\ repair_discard.stage = "populated_content_ids_to_discard"
-                /\ Discard(repair_discard)
-                /\ UNCHANGED <<snapshot_processes, current_timestamp, gc_marks, gc_mark_manifests>>
-\*                             \/ \* Remove manifests if all contents to be removed in the discard phase have been removed
-\*                                /\ repair_discard.stage = "populated_content_ids_to_discard"
-\*                                /\ RemoveManifests(repair_discard)
-\*                                /\ UNCHANGED <<snapshot_processes, current_timestamp, gc_marks, index_entries, gc_repair_discards>>
+                /\ gc_repair_delete.stage = "start"
+                /\ Repair(gc_repair_delete)
+                /\ UNCHANGED <<snapshot_processes, current_timestamp, gc_discards>>
+             \/
+                \* Delete some contents which are in index_entries, but not referenced by the snapshots.
+                /\ DeleteContents(gc_repair_delete)
+                /\ UNCHANGED <<snapshot_processes, index_entries, current_timestamp, gc_discards>>
+             \/ \* Flush local index_entries of deleted contents
+                /\ gc_repair_delete.deletions_to_be_flushed # {}
+                /\ FlushDeletedContents(gc_repair_delete)
+                /\ UNCHANGED <<snapshot_processes, current_timestamp, gc_discards>>
 
 KopiaNext ==
     \/
         /\ SnapshotProcessing
     \/
-        /\ GC_Mark
+        /\ GC_Discard
     \/
-        /\ GC_Repair_Discard
+        /\ GC_Repair_Delete
     \/
         \* Tick time forward.
         /\ current_timestamp < MaxLogicalTime
         /\ current_timestamp' = current_timestamp + 1
-        /\ UNCHANGED <<index_entries, snapshot_processes, gc_marks, gc_mark_manifests, gc_repair_discards>>
+        /\ UNCHANGED <<index_entries, snapshot_processes, gc_discards, gc_repair_deletes>>
 
 (* Invariants and safety check *)
 GCInvariant ==
@@ -391,7 +358,11 @@ GetContentInfoCheck2 ==
         /\ content1.timestamp < content2.timestamp
         /\ GetContentInfo(index_entries, content1.content_id) = content1
 
+Test ==
+    ~ (/\ current_timestamp = 2
+       /\ HasContentInfo(index_entries, 0)
+       /\ GetContentInfo(index_entries, 0).deleted = TRUE)
 =============================================================================
 \* Modification History
-\* Last modified Sat Jun 20 18:23:20 CDT 2020 by pkj
+\* Last modified Wed Aug 12 15:49:01 CDT 2020 by pkj
 \* Created Fri Apr 10 15:50:28 CDT 2020 by pkj
